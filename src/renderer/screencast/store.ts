@@ -2,8 +2,10 @@ import BaseStore from 'share/renderer/store/BaseStore'
 import { IDevice } from 'common/types'
 import { action, makeObservable, observable, runInAction, toJS } from 'mobx'
 import ScrcpyClient from './lib/ScrcpyClient'
-import { ScrcpyOptions3_1 } from '@yume-chan/scrcpy'
+import { ScrcpyOptions4_0 } from '@yume-chan/scrcpy'
 import defaults from 'licia/defaults'
+import strHash from 'licia/strHash'
+import toStr from 'licia/toStr'
 
 class Store extends BaseStore {
   device!: IDevice
@@ -65,12 +67,13 @@ class Store extends BaseStore {
 
       this.scrcpyClient = new ScrcpyClient(
         device.id,
-        new ScrcpyOptions3_1({
+        new ScrcpyOptions4_0<ScrcpyOptions4_0.Init>({
           audio: true,
           videoBitRate: settings.videoBitRate,
           maxSize: settings.maxSize,
           clipboardAutosync: true,
           stayAwake: true,
+          scid: toStr(strHash(device.id) % 999999),
         })
       )
       this.scrcpyClient.on('close', () => {

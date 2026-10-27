@@ -1,11 +1,11 @@
 import { TransformStream } from '@yume-chan/stream-extra'
-import { ScrcpyMediaStreamPacket } from '@yume-chan/scrcpy'
+import { ScrcpyAudioStreamPacket } from '@yume-chan/scrcpy'
 import log from 'share/common/log'
 
 const logger = log('AudioStream')
 
 export class OpusStream extends TransformStream<
-  ScrcpyMediaStreamPacket,
+  ScrcpyAudioStreamPacket,
   Float32Array
 > {
   constructor(config: AudioDecoderConfig) {

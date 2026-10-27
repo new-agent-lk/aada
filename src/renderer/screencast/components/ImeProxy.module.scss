@@ -1,0 +1,13 @@
+.imeProxy {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  outline: none;
+  resize: none;
+  opacity: 0;
+  z-index: -1;
+}

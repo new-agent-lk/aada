@@ -5,6 +5,7 @@ import Style from './Screencast.module.scss'
 import endWith from 'licia/endWith'
 import { LoadingBar } from 'share/renderer/components/loading'
 import { installPackages } from '../../lib/util'
+import ImeProxy from './ImeProxy'
 
 export default observer(function Screencast() {
   const { device, scrcpyClient } = store
@@ -47,6 +48,10 @@ export default observer(function Screencast() {
       onDrop={onDrop}
       onDragOver={(e) => e.preventDefault()}
     >
+      <ImeProxy
+        {...scrcpyClient.keyboardHandlers}
+        onRef={(element) => scrcpyClient.setImeProxy(element)}
+      />
       {isLoading && <LoadingBar />}
     </div>
   )

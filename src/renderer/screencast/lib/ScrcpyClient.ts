@@ -1,25 +1,24 @@
-import strHash from 'licia/strHash'
-import toStr from 'licia/toStr'
 import type net from 'node:net'
 import lpad from 'licia/lpad'
 import Emitter from 'licia/Emitter'
 import log from 'share/common/log'
 import {
-  ScrcpyOptions3_1,
+  ScrcpyOptions4_0,
   ScrcpyVideoCodecId,
   ScrcpyAudioCodec,
   ScrcpyControlMessageWriter,
   AndroidMotionEventAction,
   AndroidMotionEventButton,
-  AndroidScreenPowerMode,
   AndroidKeyEventAction,
   AndroidKeyCode,
   ScrcpyMediaStreamDataPacket,
+  ScrcpyVideoStreamPacket,
 } from '@yume-chan/scrcpy'
 import {
   InspectStream,
   WritableStream,
   ReadableStream,
+  TransformStream,
   BufferedReadableStream,
   PushReadableStream,
   Consumable,
@@ -51,15 +50,21 @@ export default class ScrcpyClient extends Emitter {
   private video: any
   private audio: any
   private control: any
-  private options: ScrcpyOptions3_1
+  private options: ScrcpyOptions4_0<ScrcpyOptions4_0.Init>
   private readiness = new Readiness()
   private recorder = new Recorder()
   private keyboard = new Keyboard(this)
-  constructor(deviceId: string, options: ScrcpyOptions3_1) {
+  /**
+   * The hidden textarea used as the IME target.
+   */
+  private imeProxy?: HTMLTextAreaElement
+  constructor(
+    deviceId: string,
+    options: ScrcpyOptions4_0<ScrcpyOptions4_0.Init>
+  ) {
     super()
 
     this.options = options
-    options.value.scid = toStr(strHash(deviceId) % 999999)
     this.deviceId = deviceId
 
     this.start()
@@ -71,6 +76,25 @@ export default class ScrcpyClient extends Emitter {
   async getControl() {
     await this.readiness.ready('control')
     return this.control
+  }
+  /**
+   * The keyboard event handlers, used by the IME proxy element.
+   */
+  get keyboardHandlers() {
+    return {
+      onInput: this.keyboard.input,
+      onKeyDown: this.keyboard.down,
+      onKeyUp: this.keyboard.up,
+      onCompositionStart: this.keyboard.compositionStart,
+      onCompositionUpdate: this.keyboard.compositionUpdate,
+      onCompositionEnd: this.keyboard.compositionEnd,
+    }
+  }
+  /**
+   * Registers the hidden textarea used as the IME target.
+   */
+  setImeProxy(element: HTMLTextAreaElement | null) {
+    this.imeProxy = element ?? undefined
   }
   destroy() {
     logger.info('destroy')
@@ -102,14 +126,14 @@ export default class ScrcpyClient extends Emitter {
     await this.readiness.ready('control')
     if (this.control) {
       const controller: ScrcpyControlMessageWriter = this.control.controller
-      controller.setScreenPowerMode(AndroidScreenPowerMode.Off)
+      controller.setDisplayPower(false)
     }
   }
   async turnOnScreen() {
     await this.readiness.ready('control')
     if (this.control) {
       const controller: ScrcpyControlMessageWriter = this.control.controller
-      controller.setScreenPowerMode(AndroidScreenPowerMode.Normal)
+      controller.setDisplayPower(true)
     }
   }
   async setClipboard(text: string, paste = false) {
@@ -219,7 +243,11 @@ export default class ScrcpyClient extends Emitter {
         codec = ScrcpyVideoCodecId.H264
         break
     }
-    const renderer = new InsertableStreamVideoFrameRenderer()
+    const renderer = new InsertableStreamVideoFrameRenderer(undefined, {
+      // Keep `element.width`/`element.height` in sync with the video size,
+      // they are used to calculate the pointer coordinates.
+      updateSize: true,
+    })
     const decoder = new WebCodecsVideoDecoder({
       codec,
       renderer,
@@ -229,12 +257,28 @@ export default class ScrcpyClient extends Emitter {
       stream: stream
         .pipeThrough(options.createMediaStreamTransformer())
         .pipeThrough(
-          new InspectStream((packet) => {
+          new InspectStream((packet: ScrcpyVideoStreamPacket) => {
             this.recorder.addVideoPacket(packet)
             if (packet.type === 'configuration') {
               logger.info('video configuration', packet.data)
             }
+            return undefined
           })
+        )
+        // Since scrcpy 4.0, the video stream contains "session" packets
+        // carrying the video size. They aren't media data, so they must not
+        // be passed to the decoder.
+        .pipeThrough(
+          new TransformStream<ScrcpyVideoStreamPacket, ScrcpyVideoStreamPacket>(
+            {
+              transform(packet, controller) {
+                if (packet.type === 'session') {
+                  return
+                }
+                controller.enqueue(packet)
+              },
+            }
+          )
         ),
       metadata,
       decoder,
@@ -249,7 +293,8 @@ export default class ScrcpyClient extends Emitter {
     logger.info('bind video event')
 
     el.addEventListener('pointerdown', (e) => {
-      el.focus()
+      // Keep the focus on the IME proxy, so the system IME keeps working
+      this.imeProxy?.focus()
       if (e.button === 0) {
         this.injectTouch(el, e)
       } else {
@@ -267,9 +312,9 @@ export default class ScrcpyClient extends Emitter {
 
     el.addEventListener('wheel', (e) => this.injectScroll(el, e))
 
-    el.setAttribute('tabindex', '0')
-    el.addEventListener('keydown', this.keyboard.down)
-    el.addEventListener('keyup', this.keyboard.up)
+    // The keyboard events are handled by the IME proxy element,
+    // so the video element doesn't need to be focusable.
+    el.setAttribute('tabindex', '-1')
   }
   private injectKeyCode(e: PointerEvent) {
     e.preventDefault()
@@ -309,8 +354,8 @@ export default class ScrcpyClient extends Emitter {
     }
   }
   private getPointer(el: HTMLVideoElement, clientX: number, clientY: number) {
-    const screenWidth = el.width
-    const screenHeight = el.height
+    const videoWidth = el.width
+    const videoHeight = el.height
 
     const rect = el.getBoundingClientRect()
 
@@ -320,14 +365,14 @@ export default class ScrcpyClient extends Emitter {
       x: 0,
       y: 0,
     }
-    if (screenWidth / screenHeight < rect.width / rect.height) {
+    if (videoWidth / videoHeight < rect.width / rect.height) {
       videoRect.height = rect.height
-      videoRect.width = videoRect.height * (screenWidth / screenHeight)
+      videoRect.width = videoRect.height * (videoWidth / videoHeight)
       videoRect.x = rect.x + (rect.width - videoRect.width) / 2
       videoRect.y = rect.y
     } else {
       videoRect.width = rect.width
-      videoRect.height = videoRect.width * (screenHeight / screenWidth)
+      videoRect.height = videoRect.width * (videoHeight / videoWidth)
       videoRect.x = rect.x
       videoRect.y = rect.y + (rect.height - videoRect.height) / 2
     }
@@ -335,12 +380,12 @@ export default class ScrcpyClient extends Emitter {
     const percentageX = clamp((clientX - videoRect.x) / videoRect.width, 0, 1)
     const percentageY = clamp((clientY - videoRect.y) / videoRect.height, 0, 1)
 
-    const pointerX = percentageX * screenWidth
-    const pointerY = percentageY * screenHeight
+    const pointerX = percentageX * videoWidth
+    const pointerY = percentageY * videoHeight
 
     return {
-      screenWidth,
-      screenHeight,
+      videoWidth,
+      videoHeight,
       pointerX,
       pointerY,
     }
@@ -477,6 +522,7 @@ export default class ScrcpyClient extends Emitter {
   }
   private async parseDeviceMessages(controlStream: ReadableStream<Uint8Array>) {
     const buffered = new BufferedReadableStream(controlStream)
+    const parsers = this.options.deviceMessageParsers
     try {
       while (true) {
         let type: number
@@ -484,19 +530,19 @@ export default class ScrcpyClient extends Emitter {
           const result = await buffered.readExactly(1)
           type = result[0]!
         } catch {
-          this.options.endDeviceMessageStream()
+          parsers.close()
           break
         }
-        await this.options.parseDeviceMessage(type, buffered)
+        await parsers.parse(type, buffered)
       }
     } catch (e) {
-      this.options.endDeviceMessageStream(e)
+      parsers.error(e)
       buffered.cancel(e).catch(() => {})
     }
   }
 }
 
-const PointerEventButtonToAndroidButton = [
+const PointerEventButtonToAndroidButton: AndroidMotionEventButton[] = [
   AndroidMotionEventButton.Primary,
   AndroidMotionEventButton.Tertiary,
   AndroidMotionEventButton.Secondary,
@@ -504,7 +550,7 @@ const PointerEventButtonToAndroidButton = [
   AndroidMotionEventButton.Forward,
 ]
 
-const MouseEventButtonToAndroidButton = [
+const MouseEventButtonToAndroidButton: AndroidKeyCode[] = [
   AndroidKeyCode.AndroidHome,
   AndroidKeyCode.AndroidBack,
 ]

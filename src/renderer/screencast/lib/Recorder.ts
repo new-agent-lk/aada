@@ -1,11 +1,10 @@
+import { annexBSplitNalu, H264 } from '@yume-chan/media-codec'
 import {
-  annexBSplitNalu,
-  h264SearchConfiguration,
   ScrcpyAudioCodec,
   ScrcpyMediaStreamDataPacket,
-  ScrcpyMediaStreamPacket,
   ScrcpyVideoCodecId,
   ScrcpyVideoStreamMetadata,
+  ScrcpyVideoStreamPacket,
 } from '@yume-chan/scrcpy'
 import { ArrayBufferTarget, Muxer as WebMMuxer } from 'webm-muxer'
 import log from 'share/common/log'
@@ -64,7 +63,9 @@ function h264StreamToAvcSample(buffer: Uint8Array) {
 const MatroskaVideoCodecNameMap: Record<ScrcpyVideoCodecId, string> = {
   [ScrcpyVideoCodecId.H264]: 'V_MPEG4/ISO/AVC',
   [ScrcpyVideoCodecId.H265]: 'V_MPEGH/ISO/HEVC',
-  [ScrcpyVideoCodecId.AV1]: 'V_AV1',
+  [ScrcpyVideoCodecId.Av1]: 'V_AV1',
+  [ScrcpyVideoCodecId.Vp8]: 'V_VP8',
+  [ScrcpyVideoCodecId.Vp9]: 'V_VP9',
 }
 
 const MatroskaAudioCodecNameMap: Record<string, string> = {
@@ -82,6 +83,20 @@ export default class Recorder {
   private videoCodecDescription?: Uint8Array
   private configurationWritten = false
   private _firstTimestamp = -1
+  /**
+   * Video size.
+   *
+   * Since scrcpy 4.0, the video size isn't part of the stream metadata anymore,
+   * it's reported by "session" packets instead.
+   */
+  private _videoWidth?: number
+  private _videoHeight?: number
+  get videoWidth() {
+    return this._videoWidth ?? this.videoMetadata?.width
+  }
+  get videoHeight() {
+    return this._videoHeight ?? this.videoMetadata?.height
+  }
   start() {
     if (!this.videoMetadata) {
       throw new Error('videoMetadata must be set')
@@ -95,8 +110,8 @@ export default class Recorder {
       firstTimestampBehavior: 'permissive',
       video: {
         codec: MatroskaVideoCodecNameMap[this.videoMetadata.codec!],
-        width: this.videoMetadata.width ?? 0,
-        height: this.videoMetadata.height ?? 0,
+        width: this.videoWidth ?? 0,
+        height: this.videoHeight ?? 0,
       },
     }
 
@@ -124,12 +139,22 @@ export default class Recorder {
     this.configurationWritten = false
     this.running = false
     this._firstTimestamp = -1
+    this._videoWidth = undefined
+    this._videoHeight = undefined
 
     return buf
   }
-  addVideoPacket(packet: ScrcpyMediaStreamPacket) {
+  addVideoPacket(packet: ScrcpyVideoStreamPacket) {
     if (!this.videoMetadata) {
       throw new Error('videoMetadata must be set')
+    }
+
+    if (packet.type === 'session') {
+      // Session metadata (video size changed), no media data
+      logger.info('video session packet', packet)
+      this._videoWidth = packet.width
+      this._videoHeight = packet.height
+      return
     }
 
     if (packet.type === 'configuration') {
@@ -137,7 +162,7 @@ export default class Recorder {
       switch (this.videoMetadata.codec) {
         case ScrcpyVideoCodecId.H264:
           const { sequenceParameterSet, pictureParameterSet } =
-            h264SearchConfiguration(packet.data)
+            H264.searchConfiguration(packet.data)
           this.videoCodecDescription =
             h264ConfigurationToAvcDecoderConfigurationRecord(
               sequenceParameterSet,

@@ -20,7 +20,7 @@ class ScrcpyClient {
 
     const device = client.getDevice(this.deviceId)
     const socket = await device.shell(
-      `CLASSPATH=/data/local/tmp/aya/scrcpy.jar app_process /system/bin com.genymobile.scrcpy.Server 3.1 ${args.join(
+      `CLASSPATH=/data/local/tmp/aya/scrcpy.jar app_process /system/bin com.genymobile.scrcpy.Server 4.0 ${args.join(
         ' '
       )}`
     )
