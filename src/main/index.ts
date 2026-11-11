@@ -6,6 +6,7 @@ import * as terminal from 'share/main/window/terminal'
 import * as window from 'share/main/lib/window'
 import log from 'share/common/log'
 import { getSettingsStore } from './lib/store'
+import { autoCheck, assertManifestConsistency } from './lib/scrcpy-updater'
 import 'share/main'
 
 const logger = log('main')
@@ -23,4 +24,10 @@ app.on('ready', () => {
   adb.init()
   main.showWin()
   menu.init()
+
+  assertManifestConsistency()
+
+  if (settingsStore.get('scrcpyAutoCheck') !== false) {
+    autoCheck()
+  }
 })

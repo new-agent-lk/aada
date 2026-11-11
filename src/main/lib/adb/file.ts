@@ -3,8 +3,13 @@ import fs from 'fs-extra'
 import os from 'node:os'
 import path from 'node:path'
 import { handleEvent } from 'share/main/lib/util'
+import log from 'share/common/log'
 import { shell as electronShell } from 'electron'
-import { isRooted, shell } from './base'
+import { isRooted, shell, hasSu, rootShell } from './base'
+import {
+  assertSafePath as assertSafePathBase,
+  quoteShellArg,
+} from './path-utils'
 import map from 'licia/map'
 import filter from 'licia/filter'
 import startWith from 'licia/startWith'
@@ -15,6 +20,7 @@ import uuid from 'licia/uuid'
 import { getPackages } from './package'
 import {
   IFile,
+  IpcCopyFile,
   IpcCreateDir,
   IpcDeleteDir,
   IpcDeleteFile,
@@ -34,6 +40,8 @@ import mime from 'licia/mime'
 
 let client: Client
 
+const logger = log('adb-file')
+
 const fileSemaphore = new Semaphore(5)
 const waitFileSemaphore = function (): Promise<void> {
   return new Promise((resolve) => {
@@ -41,7 +49,15 @@ const waitFileSemaphore = function (): Promise<void> {
   })
 }
 
+// Path traversal guard; the pure check lives in ./path-utils (unit-tested) and
+// the rejection is logged here.
+function assertSafePath(p: string) {
+  assertSafePathBase(p, (message, badPath) => logger.warn(message, badPath))
+}
+
 const pullFile: IpcPullFile = async function (deviceId, src, dest) {
+  assertSafePath(src)
+  assertSafePath(dest)
   const stat = await statFile(deviceId, src)
 
   if (stat.directory) {
@@ -59,17 +75,37 @@ const pullFile: IpcPullFile = async function (deviceId, src, dest) {
     await waitFileSemaphore()
 
     let tmpFilePath = ''
-    if (startWith(src, '/data/data/')) {
-      if (!(await isRooted(deviceId))) {
-        tmpFilePath = '/data/local/tmp/' + uuid()
-        await shell(deviceId, `touch "${tmpFilePath}"`)
-        await fileShell(deviceId, 'cp', src, tmpFilePath)
-        src = tmpFilePath
+    let device: any
+    let transfer: any
+    try {
+      if (startWith(src, '/data/data/')) {
+        if (!(await isRooted(deviceId))) {
+          tmpFilePath = '/data/local/tmp/' + uuid()
+          await shell(deviceId, `touch ${quoteShellArg(tmpFilePath)}`)
+          await fileShell(deviceId, 'cp', src, tmpFilePath)
+          src = tmpFilePath
+        } else if (await hasSu(deviceId)) {
+          // `device.pull` runs as the adbd user, it can't read `/data/data`
+          // on a device rooted with a root manager, so copy the file with a
+          // root shell first.
+          tmpFilePath = '/data/local/tmp/' + uuid()
+          await rootShell(
+            deviceId,
+            `cp ${quoteShellArg(src)} ${quoteShellArg(tmpFilePath)}`
+          )
+          src = tmpFilePath
+        }
       }
-    }
 
-    const device = await client.getDevice(deviceId)
-    const transfer = await device.pull(src)
+      device = await client.getDevice(deviceId)
+      transfer = await device.pull(src)
+    } catch (err) {
+      if (tmpFilePath) {
+        deleteFile(deviceId, tmpFilePath).catch(() => {})
+      }
+      fileSemaphore.signal()
+      throw err
+    }
 
     const id = uuid()
     window.sendTo(
@@ -117,6 +153,7 @@ export async function pullFileData(
   deviceId: string,
   path: string
 ): Promise<Buffer> {
+  assertSafePath(path)
   const device = await client.getDevice(deviceId)
   const transfer = await device.pull(path)
 
@@ -139,14 +176,19 @@ const openFile: IpcOpenFile = async function (deviceId, p) {
 }
 
 const deleteFile: IpcDeleteFile = async function (deviceId, path) {
+  assertSafePath(path)
+  logger.info('deleteFile', path)
   await fileShell(deviceId, 'rm', path)
 }
 
 const deleteDir: IpcDeleteDir = async function (deviceId, path) {
+  assertSafePath(path)
+  logger.info('deleteDir', path)
   await fileShell(deviceId, 'rm -rf', path)
 }
 
 const createDir: IpcCreateDir = async function (deviceId, path) {
+  assertSafePath(path)
   await fileShell(deviceId, 'mkdir -p', path)
 }
 
@@ -155,6 +197,8 @@ const pushFile: IpcPushFile = async function (
   src: string,
   dest: string
 ) {
+  assertSafePath(src)
+  assertSafePath(dest)
   const stat = await fs.stat(src)
 
   if (stat.isDirectory()) {
@@ -170,14 +214,29 @@ const pushFile: IpcPushFile = async function (
     await waitFileSemaphore()
 
     let tmpFilePath = ''
-    if (startWith(dest, '/data/data/')) {
-      if (!(await isRooted(deviceId))) {
-        tmpFilePath = '/data/local/tmp/' + uuid()
+    let device: any
+    let transfer: any
+    try {
+      if (startWith(dest, '/data/data/')) {
+        if (!(await isRooted(deviceId))) {
+          tmpFilePath = '/data/local/tmp/' + uuid()
+        } else if (await hasSu(deviceId)) {
+          // `device.push` runs as the adbd user, it can't write `/data/data`
+          // on a device rooted with a root manager, so push to a temporary
+          // file and move it with a root shell.
+          tmpFilePath = '/data/local/tmp/' + uuid()
+        }
       }
-    }
 
-    const device = await client.getDevice(deviceId)
-    const transfer = await device.push(src, tmpFilePath || dest)
+      device = await client.getDevice(deviceId)
+      transfer = await device.push(src, tmpFilePath || dest)
+    } catch (err) {
+      if (tmpFilePath) {
+        deleteFile(deviceId, tmpFilePath).catch(() => {})
+      }
+      fileSemaphore.signal()
+      throw err
+    }
 
     const id = uuid()
     window.sendTo(
@@ -217,14 +276,29 @@ const pushFile: IpcPushFile = async function (
 }
 
 const moveFile: IpcMoveFile = async function (deviceId, src, dest) {
+  assertSafePath(src)
+  assertSafePath(dest)
   await fileShell(deviceId, 'mv', src, dest)
 }
 
+const copyFile: IpcCopyFile = async function (deviceId, src, dest) {
+  assertSafePath(src)
+  assertSafePath(dest)
+  await fileShell(deviceId, 'cp -r', src, dest)
+}
+
 const readDir: IpcReadDir = async function (deviceId, path) {
+  assertSafePath(path)
   if (startWith(path, '/data/') && !startWith(path, '/data/local/tmp/')) {
     if (!(await isRooted(deviceId))) {
       return readDataDir(deviceId, path)
     }
+  }
+
+  // `device.readdir` runs as the adbd user, it can't access `/data/data`
+  // on a device rooted with a root manager.
+  if (await hasSu(deviceId)) {
+    return readDirByShell(deviceId, path)
   }
 
   const device = await client.getDevice(deviceId)
@@ -249,6 +323,21 @@ const readDir: IpcReadDir = async function (deviceId, path) {
     ret.push(item)
   }
 
+  return ret
+}
+
+/**
+ * Lists a directory using a root shell.
+ */
+async function readDirByShell(deviceId: string, path: string) {
+  const ls = await rootShell(deviceId, `ls -al ${quoteShellArg(path)}`)
+  const ret: any[] = []
+  each(ls.split('\n'), (line) => {
+    const item = parseLsLine(line)
+    if (item) {
+      ret.push(item)
+    }
+  })
   return ret
 }
 
@@ -360,7 +449,10 @@ function parseLsLine(line: string) {
   if (!match) {
     return null
   }
-  const name = match[8]
+  // `ls` escapes spaces and shell-special characters with a backslash when its
+  // stdout is a tty (adbkit's `device.shell` allocates a pty), so `a b.txt`
+  // arrives as `a\ b.txt`. Undo it, or paths built from the name won't exist.
+  const name = match[8].replace(/\\(.)/g, '$1')
   if (name === '.' || name === '..') {
     return
   }
@@ -373,12 +465,25 @@ function parseLsLine(line: string) {
   }
 }
 
+/**
+ * Runs a file command, using a root shell when the device has one.
+ *
+ * The adb shell runs as the adbd user, it can't access `/data/data` on a
+ * device rooted with a root manager, so a root shell is used instead.
+ */
 async function fileShell(
   deviceId: string,
   cmd: string,
   path: string,
   dest?: string
 ) {
+  assertSafePath(path)
+  if (dest) {
+    assertSafePath(dest)
+  }
+  const quotedPath = quoteShellArg(path)
+  const quotedDest = dest ? ' ' + quoteShellArg(dest) : ''
+
   if (
     startWith(path, '/data/data/') ||
     (dest && startWith(dest, '/data/data/'))
@@ -393,15 +498,19 @@ async function fileShell(
       const pkg = segments[0]
       return shell(
         deviceId,
-        `run-as ${pkg} ${cmd} "${path}"${dest ? ` "${dest}"` : ''}`
+        `run-as ${quoteShellArg(pkg)} ${cmd} ${quotedPath}${quotedDest}`
       )
+    }
+
+    if (await hasSu(deviceId)) {
+      return rootShell(deviceId, `${cmd} ${quotedPath}${quotedDest}`)
     }
   }
 
-  return shell(deviceId, `${cmd} "${path}"`)
+  return shell(deviceId, `${cmd} ${quotedPath}${quotedDest}`)
 }
-
 const statFile: IpcStatFile = async function (deviceId, path) {
+  assertSafePath(path)
   if (startWith(path, '/data/data/')) {
     if (!(await isRooted(deviceId))) {
       const ls = await fileShell(deviceId, 'ls -ld', path)
@@ -415,6 +524,22 @@ const statFile: IpcStatFile = async function (deviceId, path) {
         directory: item.directory,
         mode: item.mode,
       }
+    }
+  }
+
+  // `device.stat` runs as the adbd user, it can't access `/data/data`
+  // on a device rooted with a root manager.
+  if (await hasSu(deviceId)) {
+    const ls = await rootShell(deviceId, `ls -ld ${quoteShellArg(path)}`)
+    const item = parseLsLine(trim(ls))
+    if (!item) {
+      throw new Error(`Failed to stat file: ${path}`)
+    }
+    return {
+      size: item.size,
+      mtime: item.mtime,
+      directory: item.directory,
+      mode: item.mode,
     }
   }
 
@@ -440,5 +565,6 @@ export async function init(c: Client) {
   handleEvent('deleteDir', deleteDir)
   handleEvent('createDir', createDir)
   handleEvent('moveFile', moveFile)
+  handleEvent('copyFile', copyFile)
   handleEvent('statFile', statFile)
 }

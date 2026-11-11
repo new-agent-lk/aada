@@ -12,6 +12,8 @@ export class File {
   weights = [70, 30]
   transferWeight = 30
   transfers: Transfer[] = []
+  // device-internal clipboard: which entries were copied/cut, for Ctrl+V
+  deviceClipboard: { mode: 'copy' | 'cut'; paths: string[] } | null = null
   constructor() {
     makeObservable(this, {
       listView: observable,
@@ -19,6 +21,7 @@ export class File {
       showPreview: observable,
       transferWeight: observable,
       transfers: observable,
+      deviceClipboard: observable,
       weights: observable,
     })
 
@@ -41,6 +44,13 @@ export class File {
       transferWeight: this.transferWeight,
       showPreview: this.showPreview,
       weights: toJS(this.weights),
+    })
+  }
+  setDeviceClipboard(
+    clipboard: { mode: 'copy' | 'cut'; paths: string[] } | null
+  ) {
+    runInAction(() => {
+      this.deviceClipboard = clipboard
     })
   }
   private bindEvent() {

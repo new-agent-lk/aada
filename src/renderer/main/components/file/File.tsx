@@ -24,6 +24,7 @@ import startWith from 'licia/startWith'
 import LunaSplitPane, { LunaSplitPaneItem } from 'luna-split-pane/react'
 import Transfer from './Transfer'
 import FilePreview from 'share/renderer/components/FilePreview'
+import { uniqueName } from 'common/unique-name'
 
 export default observer(function File() {
   const [fileList, setFileList] = useState<IFile[]>([])
@@ -40,8 +41,45 @@ export default observer(function File() {
   const { device, file } = store
 
   useEffect(() => {
-    go('/')
-  }, [])
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      if (!device || !(e.ctrlKey || e.metaKey)) {
+        return
+      }
+      const key = e.key.toLowerCase()
+      if (key === 'c' && selected) {
+        e.preventDefault()
+        copySelection(selected, 'copy')
+      } else if (key === 'x' && selected) {
+        e.preventDefault()
+        copySelection(selected, 'cut')
+      } else if (key === 'v') {
+        e.preventDefault()
+        if (file.deviceClipboard) {
+          pasteDeviceClipboard()
+        } else {
+          pasteFromClipboard()
+        }
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [device, selected, path])
+
+  useEffect(() => {
+    if (device) {
+      // 默认进入共享存储（可写），避免在只读的 / 根目录上传/粘贴失败
+      go('/sdcard/')
+    }
+  }, [device?.id])
 
   async function getFiles(path: string) {
     if (device) {
@@ -177,10 +215,15 @@ export default observer(function File() {
             )
             if (result) {
               const filePath = path + file.name
-              if (file.directory) {
-                await main.deleteDir(device.id, filePath)
-              } else {
-                await main.deleteFile(device.id, filePath)
+              try {
+                if (file.directory) {
+                  await main.deleteDir(device.id, filePath)
+                } else {
+                  await main.deleteFile(device.id, filePath)
+                }
+              } catch (e) {
+                notify(String(e), { icon: 'error' })
+                return
               }
               getFiles(path)
             }
@@ -203,10 +246,41 @@ export default observer(function File() {
             }
           },
         },
+        {
+          type: 'separator',
+        },
+        {
+          label: t('copy'),
+          click: () => copySelection(file, 'copy'),
+        },
+        {
+          label: t('cut'),
+          click: () => copySelection(file, 'cut'),
+        },
+        {
+          label: t('copyTo'),
+          click: () => copyTo(file, 'copy'),
+        },
+        {
+          label: t('moveTo'),
+          click: () => copyTo(file, 'move'),
+        },
       ]
       contextMenu(e, template)
     } else {
       const template: any[] = [
+        {
+          label: t('pasteFile'),
+          click: () => pasteFromClipboard(),
+        },
+        {
+          label: t('paste'),
+          enabled: !!store.file.deviceClipboard,
+          click: () => pasteDeviceClipboard(),
+        },
+        {
+          type: 'separator',
+        },
         {
           label: t('upload'),
           click: uploadFiles,
@@ -256,9 +330,11 @@ export default observer(function File() {
       files = filePaths
     }
 
+    const existing: IFile[] = await main.readDir(device.id, path)
     for (let i = 0, len = files!.length; i < len; i++) {
       const file = files![i]
-      const { name } = splitPath(file)
+      const name = uniqueName(existing, splitPath(file).name)
+      existing.push({ name } as IFile)
       notify(t('fileUploading', { path: file }), { icon: 'info' })
       try {
         await main.pushFile(device.id, file, path + name)
@@ -267,6 +343,73 @@ export default observer(function File() {
       }
     }
 
+    await getFiles(path)
+  }
+
+  function copySelection(item: IFile, mode: 'copy' | 'cut') {
+    if (!device) {
+      return
+    }
+    file.setDeviceClipboard({ mode, paths: [path + item.name] })
+  }
+
+  async function copyTo(item: IFile, mode: 'copy' | 'move') {
+    if (!device) {
+      return
+    }
+    let dest = await LunaModal.prompt(t('destPathPrompt'), path)
+    if (!dest) {
+      return
+    }
+    if (!endWith(dest, '/')) {
+      dest = dest + '/'
+    }
+    try {
+      const existing: IFile[] = await main.readDir(device.id, dest)
+      const name = uniqueName(existing, item.name)
+      const src = path + item.name
+      if (mode === 'move') {
+        await main.moveFile(device.id, src, dest + name)
+      } else {
+        await main.copyFile(device.id, src, dest + name)
+      }
+      getFiles(path)
+    } catch {
+      notify(t('folderNotExistErr'), { icon: 'error' })
+    }
+  }
+
+  async function pasteFromClipboard() {
+    if (!device) {
+      return
+    }
+    const files = await main.getClipboardFiles()
+    if (isEmpty(files)) {
+      notify(t('noFileInClipboard'), { icon: 'info' })
+      return
+    }
+    await uploadFiles(files)
+  }
+
+  async function pasteDeviceClipboard() {
+    if (!device || !file.deviceClipboard) {
+      return
+    }
+    const { mode, paths } = file.deviceClipboard
+    const existing: IFile[] = await main.readDir(device.id, path)
+    for (let i = 0; i < paths.length; i++) {
+      const src = paths[i]
+      const name = uniqueName(existing, splitPath(src).name)
+      existing.push({ name } as IFile)
+      if (mode === 'cut') {
+        await main.moveFile(device.id, src, path + name)
+      } else {
+        await main.copyFile(device.id, src, path + name)
+      }
+    }
+    if (mode === 'cut') {
+      file.setDeviceClipboard(null)
+    }
     await getFiles(path)
   }
 

@@ -20,7 +20,7 @@ import { getSettingsStore } from './store'
 import isWindows from 'licia/isWindows'
 import isEmpty from 'licia/isEmpty'
 import * as base from './adb/base'
-import { shell, getAdbPath, spawnAdb, isRooted } from './adb/base'
+import { shell, getAdbPath, spawnAdb, isRooted, hasSu } from './adb/base'
 import * as logcat from './adb/logcat'
 import * as shellAdb from './adb/shell'
 import * as server from './adb/server'
@@ -348,10 +348,18 @@ async function openAdbCli() {
 }
 
 async function root(deviceId: string) {
-  const id = await shell(deviceId, 'id')
-  if (contain(id, 'uid=0')) {
+  if (await isRooted(deviceId)) {
     return
   }
+
+  // A root manager (Magisk, KernelSU and its forks) provides a root shell
+  // through `su`, no need to restart adbd.
+  if (await hasSu(deviceId)) {
+    return
+  }
+
+  // Otherwise try to restart adbd as root, it only works on devices with
+  // a userdebug/eng build.
   const device = await client.getDevice(deviceId)
   await device.root()
 }

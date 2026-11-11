@@ -1,6 +1,7 @@
 import { Client } from '@devicefarmer/adbkit'
-import { handleEvent, resolveResources } from 'share/main/lib/util'
+import { handleEvent } from 'share/main/lib/util'
 import { getDeviceStore, setDeviceStore } from './base'
+import { resolveJarVersion } from '../scrcpy-updater'
 import log from 'share/common/log'
 import { IpcStartScrcpy } from 'common/types'
 
@@ -14,13 +15,14 @@ class ScrcpyClient {
     this.deviceId = deviceId
   }
   async start(args: string[]) {
-    await this.push()
+    const jar = resolveJarVersion()
+    await this.push(jar.path)
 
     logger.info('start', args)
 
     const device = client.getDevice(this.deviceId)
     const socket = await device.shell(
-      `CLASSPATH=/data/local/tmp/aya/scrcpy.jar app_process /system/bin com.genymobile.scrcpy.Server 4.0 ${args.join(
+      `CLASSPATH=/data/local/tmp/aya/scrcpy.jar app_process /system/bin com.genymobile.scrcpy.Server ${jar.version} ${args.join(
         ' '
       )}`
     )
@@ -31,14 +33,11 @@ class ScrcpyClient {
       }
     })
   }
-  async push() {
+  async push(jarPath: string) {
     logger.info('push')
 
     const device = client.getDevice(this.deviceId)
-    await device.push(
-      resolveResources('scrcpy.jar'),
-      '/data/local/tmp/aya/scrcpy.jar'
-    )
+    await device.push(jarPath, '/data/local/tmp/aya/scrcpy.jar')
   }
 }
 

@@ -3,6 +3,7 @@ import { observer } from 'mobx-react-lite'
 import { createPortal } from 'react-dom'
 import LunaSetting, {
   LunaSettingButton,
+  LunaSettingCheckbox,
   LunaSettingNumber,
   LunaSettingSelect,
 } from 'luna-setting/react'
@@ -51,6 +52,11 @@ export default observer(function SettingsModal(props: IModalProps) {
             1920: '1920',
             [t('actualSize')]: '0',
           }}
+        />
+        <LunaSettingCheckbox
+          keyName="clipboardSync"
+          value={store.settings.clipboardSync}
+          description={t('clipboardSync')}
         />
         <LunaSettingButton
           description={t('restart')}
