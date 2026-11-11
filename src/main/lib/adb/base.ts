@@ -131,6 +131,70 @@ export async function shell(
   return map(output.split('aya_separator'), (val) => trim(val))
 }
 
+/**
+ * Whether the device provides a usable `su` command.
+ *
+ * KernelSU (and its forks like Resukisu) and Magisk both provide `su`,
+ * which is the only way to get a root shell on a production device.
+ */
+const suAvailable: Record<string, boolean> = {}
+
+/**
+ * How long to wait for the root manager to authorize the app.
+ */
+const SU_TIMEOUT = 3000
+
+/**
+ * Checks whether `su` can be used to get a root shell.
+ *
+ * The result is cached, the first successful check authorizes the app
+ * (the root manager may ask the user), so later calls don't prompt again.
+ */
+export async function hasSu(deviceId: string): Promise<boolean> {
+  if (suAvailable[deviceId] !== undefined) {
+    return suAvailable[deviceId]
+  }
+
+  let available = false
+  try {
+    // `su -c id` prints the id of the root shell,
+    // it fails if the app is not authorized (or `su` doesn't exist).
+    //
+    // The root manager may ask the user to authorize the app, the command
+    // blocks until the user answers, so it must not wait forever.
+    const id = await Promise.race([
+      shell(deviceId, 'su -c id'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve(''), SU_TIMEOUT)
+      ),
+    ])
+    available = contain(id, 'uid=0')
+  } catch (e) {
+    logger.warn('check su failed', e)
+  }
+
+  suAvailable[deviceId] = available
+  logger.info('su available', deviceId, available)
+
+  return available
+}
+
+/**
+ * Runs a command in a root shell.
+ *
+ * The device must have a working `su` (see `hasSu`).
+ *
+ * The command is wrapped in single quotes, so it can contain double quotes
+ * (file paths are quoted with them).
+ */
+export async function rootShell(
+  deviceId: string,
+  cmd: string
+): Promise<string> {
+  logger.debug('rootShell', cmd)
+  return shell(deviceId, `su -c '${cmd}'`)
+}
+
 export async function forwardTcp(deviceId: string, remote: string) {
   const device = await client.getDevice(deviceId)
   const forwards = await device.listForwards()
@@ -225,7 +289,26 @@ export function spawnAdb(args: string[]): Promise<{
   })
 }
 
-export async function isRooted(deviceId: string): Promise<boolean> {
+/**
+ * Whether the adb shell itself runs as root.
+ *
+ * This only happens on devices with a userdebug/eng build, after `adb root`.
+ */
+export async function isShellRoot(deviceId: string): Promise<boolean> {
   const id = await shell(deviceId, 'id')
   return contain(id, 'uid=0')
+}
+
+/**
+ * Whether the device is rooted.
+ *
+ * Either the adb shell itself runs as root, or a root manager (Magisk,
+ * KernelSU and its forks) provides `su`.
+ */
+export async function isRooted(deviceId: string): Promise<boolean> {
+  if (await isShellRoot(deviceId)) {
+    return true
+  }
+
+  return hasSu(deviceId)
 }
