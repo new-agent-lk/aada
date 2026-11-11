@@ -2,7 +2,7 @@ import BaseStore from 'share/renderer/store/BaseStore'
 import { IDevice } from 'common/types'
 import { action, makeObservable, observable, runInAction, toJS } from 'mobx'
 import ScrcpyClient from './lib/ScrcpyClient'
-import { ScrcpyOptions4_0 } from '@yume-chan/scrcpy'
+import { ScrcpyOptions5_0_1 } from '@yume-chan/scrcpy'
 import defaults from 'licia/defaults'
 import strHash from 'licia/strHash'
 import toStr from 'licia/toStr'
@@ -56,6 +56,7 @@ class Store extends BaseStore {
   }
   async setDevice(device: IDevice | null) {
     if (device === null) {
+      main.setClipboardSync({ enabled: false })
       main.closeScreencast()
     } else {
       const deviceSettings = await main.getScreencastStore('settings')
@@ -67,8 +68,9 @@ class Store extends BaseStore {
 
       this.scrcpyClient = new ScrcpyClient(
         device.id,
-        new ScrcpyOptions4_0<ScrcpyOptions4_0.Init>({
+        new ScrcpyOptions5_0_1<ScrcpyOptions5_0_1.Init>({
           audio: true,
+          videoCodec: undefined,
           videoBitRate: settings.videoBitRate,
           maxSize: settings.maxSize,
           clipboardAutosync: true,
@@ -87,6 +89,11 @@ class Store extends BaseStore {
         this.screenOff = false
         this.device = device
       })
+
+      main.setClipboardSync({
+        enabled: settings.clipboardSync !== false,
+        deviceId: device.id,
+      })
     }
   }
   async setSettings(name: string, val: any) {
@@ -94,6 +101,9 @@ class Store extends BaseStore {
     const deviceSettings = await main.getScreencastStore('settings')
     deviceSettings[this.device.id] = toJS(this.settings)
     main.setScreencastStore('settings', deviceSettings)
+    if (name === 'clipboardSync') {
+      main.setClipboardSync({ enabled: !!val, deviceId: this.device?.id })
+    }
   }
   private async init() {
     const device = await main.getMainStore('device')
@@ -110,9 +120,8 @@ class Store extends BaseStore {
         this.setDevice(val)
       }
     })
-    main.on('focusWin', async () => {
-      const text = await navigator.clipboard.readText()
-      this.scrcpyClient.setClipboard(text)
+    main.on('clipboardFromHost', (text: string) => {
+      this.scrcpyClient?.setClipboard(text)
     })
   }
 }
@@ -120,6 +129,7 @@ class Store extends BaseStore {
 const defaultSettings = {
   videoBitRate: 8000000,
   maxSize: 0,
+  clipboardSync: true,
 }
 
 export default new Store()

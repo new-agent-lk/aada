@@ -7,6 +7,7 @@ export class Settings {
   adbPath = ''
   killAdbWhenExit = false
   useNativeTitlebar = false
+  scrcpyAutoCheck = true
   constructor() {
     makeObservable(this, {
       language: observable,
@@ -14,6 +15,7 @@ export class Settings {
       adbPath: observable,
       killAdbWhenExit: observable,
       useNativeTitlebar: observable,
+      scrcpyAutoCheck: observable,
       set: action,
     })
 
@@ -26,6 +28,7 @@ export class Settings {
       'adbPath',
       'killAdbWhenExit',
       'useNativeTitlebar',
+      'scrcpyAutoCheck',
     ]
     for (let i = 0, len = names.length; i < len; i++) {
       const name = names[i]

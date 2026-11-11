@@ -3,7 +3,7 @@ import lpad from 'licia/lpad'
 import Emitter from 'licia/Emitter'
 import log from 'share/common/log'
 import {
-  ScrcpyOptions4_0,
+  ScrcpyOptions5_0_1,
   ScrcpyVideoCodecId,
   ScrcpyAudioCodec,
   ScrcpyControlMessageWriter,
@@ -50,17 +50,18 @@ export default class ScrcpyClient extends Emitter {
   private video: any
   private audio: any
   private control: any
-  private options: ScrcpyOptions4_0<ScrcpyOptions4_0.Init>
+  private options: ScrcpyOptions5_0_1<ScrcpyOptions5_0_1.Init>
   private readiness = new Readiness()
   private recorder = new Recorder()
   private keyboard = new Keyboard(this)
+  private clipboardSeq = 0
   /**
    * The hidden textarea used as the IME target.
    */
   private imeProxy?: HTMLTextAreaElement
   constructor(
     deviceId: string,
-    options: ScrcpyOptions4_0<ScrcpyOptions4_0.Init>
+    options: ScrcpyOptions5_0_1<ScrcpyOptions5_0_1.Init>
   ) {
     super()
 
@@ -137,11 +138,16 @@ export default class ScrcpyClient extends Emitter {
     }
   }
   async setClipboard(text: string, paste = false) {
+    if (!text || new TextEncoder().encode(text).length > 1024 * 1024) {
+      return
+    }
     await this.readiness.ready('control')
     if (this.control) {
       const controller: ScrcpyControlMessageWriter = this.control.controller
-      controller.setClipboard({
-        sequence: 0n,
+      this.clipboardSeq++
+      // non-zero sequence makes the writer await AckClipboard, serializing edits
+      await controller.setClipboard({
+        sequence: BigInt(this.clipboardSeq),
         content: text,
         paste,
       })
@@ -507,7 +513,7 @@ export default class ScrcpyClient extends Emitter {
     options.clipboard!.pipeTo(
       new WritableStream({
         write: (content) => {
-          navigator.clipboard.writeText(content)
+          main.clipboardFromDevice(content)
         },
       })
     )
